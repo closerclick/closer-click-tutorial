@@ -407,7 +407,45 @@ class CloserClickTutorial extends HTMLElement {
     const vw = window.innerWidth || document.documentElement.clientWidth
     const vh = window.innerHeight || document.documentElement.clientHeight
     if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) return false
+    // Oclusión: el centro del objetivo no debe estar TAPADO por otro elemento
+    // (header fijo, modal, overlay, cajón…). Si lo está, lo tratamos como NO
+    // visible y el tutorial espera a que se descubra (o avanza tras la gracia).
+    if (this.hasAttribute('no-occlusion-check')) return true
+    const px = clamp(r.left + r.width / 2, 1, vw - 1)
+    const py = clamp(r.top + r.height / 2, 1, vh - 1)
+    let topEl = null
+    try { topEl = document.elementFromPoint(px, py) } catch { topEl = null }
+    // topEl === this → nuestra propia burbuja tapa el centro: no cuenta como oclusión.
+    if (topEl && topEl !== this && topEl !== el && !el.contains(topEl) && !topEl.contains(el)) return false
     return true
+  }
+
+  /* Detecta barras FIJAS/STICKY pegadas arriba o abajo del viewport (headers,
+     navbars, footers) para no colocar la burbuja debajo de ellas. Devuelve los
+     insets superior e inferior en px. */
+  _safeInsets () {
+    if (this.hasAttribute('no-safe-area')) return { top: 0, bottom: 0 }
+    const vw = window.innerWidth || document.documentElement.clientWidth
+    const vh = window.innerHeight || document.documentElement.clientHeight
+    let top = 0
+    let bottom = 0
+    const sample = (x, y) => {
+      let els
+      try { els = document.elementsFromPoint(x, y) } catch { return }
+      for (const e of els) {
+        if (e === this || !(e instanceof Element)) continue
+        let pos
+        try { pos = getComputedStyle(e).position } catch { continue }
+        if (pos !== 'fixed' && pos !== 'sticky') continue
+        const r = e.getBoundingClientRect()
+        if (r.width < vw * 0.5 || r.height > vh * 0.4) continue // debe ser una barra ancha y no enorme
+        if (r.top <= 2 && r.bottom > top) top = r.bottom
+        else if (r.bottom >= vh - 2 && vh - r.top > bottom) bottom = vh - r.top
+      }
+    }
+    sample(vw * 0.5, 2); sample(vw * 0.18, 2); sample(vw * 0.82, 2)
+    sample(vw * 0.5, vh - 3); sample(vw * 0.18, vh - 3); sample(vw * 0.82, vh - 3)
+    return { top, bottom }
   }
 
   _waitForTarget (step) {
@@ -452,7 +490,16 @@ class CloserClickTutorial extends HTMLElement {
   _hasFurther () {
     for (let i = this._index + 1; i < this._queue.length; i++) {
       const s = this._queue[i]
-      if (s && s.id && !this.isStepSeen(s.id)) return true
+      if (!s || !s.id || this.isStepSeen(s.id)) continue
+      // Best-effort: si su skipIf es síncrono y ya devuelve truthy, ese paso no
+      // se mostrará, así que no cuenta como "siguiente" (botón → "Entendido").
+      try {
+        if (typeof s.skipIf === 'function') {
+          const r = s.skipIf()
+          if (r && typeof r.then !== 'function') continue
+        }
+      } catch { /* ignora */ }
+      return true
     }
     return false
   }
@@ -547,8 +594,10 @@ class CloserClickTutorial extends HTMLElement {
     const vw = window.innerWidth || document.documentElement.clientWidth
     const vh = window.innerHeight || document.documentElement.clientHeight
     const margin = parseFloat(getComputedStyle(this).getPropertyValue('--cct-margin')) || 10
+    const ins = this._safeInsets()
+    this._insets = ins // cache: lo reusa _place por frame sin re-escanear el DOM
     const capW = Math.max(80, vw - 2 * margin)
-    const capH = Math.max(80, vh - 2 * margin)
+    const capH = Math.max(80, vh - 2 * margin - ins.top - ins.bottom)
     const cssMaxW = parseFloat(getComputedStyle(bubble).maxWidth)
     bubble.style.maxWidth = (Number.isFinite(cssMaxW) ? Math.min(cssMaxW, capW) : capW) + 'px'
     const body = bubble.querySelector('.body')
@@ -582,6 +631,12 @@ class CloserClickTutorial extends HTMLElement {
     const margin = parseFloat(cs.getPropertyValue('--cct-margin')) || 10
     const gap = parseFloat(cs.getPropertyValue('--cct-gap')) || 12
     const arrowSize = parseFloat(cs.getPropertyValue('--cct-arrow-size')) || 7
+    // Insets de barras fijas/sticky (header/footer): la burbuja no debe meterse
+    // debajo del navbar. Amplían el margen superior/inferior. Usamos el valor
+    // cacheado por _fit (estable durante el paso) para no re-escanear por frame.
+    const ins = this._insets || this._safeInsets()
+    const mTop = margin + ins.top
+    const mBot = margin + ins.bottom
 
     const bw = bubble.offsetWidth
     const bh = bubble.offsetHeight
@@ -596,7 +651,7 @@ class CloserClickTutorial extends HTMLElement {
     }
     const fits = (pos) =>
       pos.left >= margin && pos.left + bw <= vw - margin &&
-      pos.top >= margin && pos.top + bh <= vh - margin
+      pos.top >= mTop && pos.top + bh <= vh - mBot
 
     const opposite = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' }
     const pref = a.step.placement && opposite[a.step.placement] ? a.step.placement : 'bottom'
@@ -609,14 +664,15 @@ class CloserClickTutorial extends HTMLElement {
     }
     if (!chosen) {
       // Ningún lado entra (objetivo en una esquina/borde): elegimos el lado con
-      // MÁS espacio libre, para que el cursor apunte al objetivo tras el clamp.
-      const space = { bottom: vh - tr.bottom, top: tr.top, right: vw - tr.right, left: tr.left }
+      // MÁS espacio libre (descontando el área de barras fijas), para que el
+      // cursor apunte al objetivo tras el clamp.
+      const space = { bottom: (vh - mBot) - tr.bottom, top: tr.top - mTop, right: vw - tr.right, left: tr.left }
       const p = Object.keys(space).sort((x, y) => space[y] - space[x])[0]
       chosen = { p, ...computePos(p) }
     }
 
     const left = clamp(chosen.left, margin, vw - bw - margin)
-    const top = clamp(chosen.top, margin, vh - bh - margin)
+    const top = clamp(chosen.top, mTop, vh - bh - mBot)
     bubble.style.left = left + 'px'
     bubble.style.top = top + 'px'
 

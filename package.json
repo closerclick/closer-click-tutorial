@@ -1,6 +1,6 @@
 {
   "name": "@closerclick/closer-click-tutorial",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "UI compartida de CloserClick para tutoriales/onboarding guiado reutilizable por cualquier app del ecosistema (Vue o vanilla). Burbujas estilo donar/compartir que se muestran una sola vez, una a la vez, con orden opcional, posicionadas para no salirse de pantalla. Web Component, Shadow DOM, sin JS de terceros ni cookies, bilingue es/en, con inyeccion de estilos. La misma para todas las apps.",
   "type": "module",
   "main": "src/index.js",
